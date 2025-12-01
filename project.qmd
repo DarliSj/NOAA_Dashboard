@@ -1,0 +1,550 @@
+---
+title: "Interactive Temperature Data Viewer"
+format: 
+  html:
+    self-contained: true
+author:
+- Louis Choo-Choy
+- Darli Seranaj
+---
+
+## Setup
+
+```{r setup, include = FALSE}
+# Load libraries
+library(tidyverse)
+library(httr2)
+library(readr)
+```
+
+All of our data came from this directory of all files from GHCNd: <https://www1.ncdc.noaa.gov/pub/data/ghcn/daily/>
+
+We provide full instructions on how to reproduce the DuckDB database that we use in our app below. However, this process takes a fairly long time (\~40 minutes) to complete as the file sizes are so large, so for ease of use, we provided a short-cut way to access our database by preloading `weather.duckdb` in the `data/` folder. *Thus, after downloading [weather.duckdb](https://drive.google.com/file/d/1hELezLI87GbYqUtFALms580rwpiOESBw/view?usp=drive_link) and placing it in the `data/` folder, you will have everything you need to run the app just from pulling the repository*.
+
+**For reproducibility: instructions to reproduce weather.duckdb:**
+
+1.  Download the GHCNd data [here](https://drive.google.com/file/d/18-OhL_uh79cCXAuSKTn5HJa40Io30z6v/view?usp=drive_link&usp=embed_facebook) (large file).
+
+2.  Place the `ghcnd_all.tar` file in the `python_files/` folder called `stations_data/`.
+
+3.  Run the first code chunk `good-stations`, where the `filtered_stations_IDs.csv` file will be generated.
+
+4.  Run `duckdb_parser.py`. The `weather.duckdb` file will appear in the `python_files/` folder.
+
+5.  Run `clean_db.py`, which cleans `weather.duckdb` from incorrect data.
+
+6.  Done! The weather.duckdb should be in the `data/` folder.
+
+## Introduction
+
+The Weather Record Explorer is an interactive dashboard that helps professionals and the general public to explore daily weather records anywhere in the United States. Through an intuitive map‐based station selector and state selector menu, users can pinpoint a single weather station—and then visualize its maximum and minimum temperatures alongside precipitation totals over custom date ranges. By illustrating both long‐term trends and recent data, the dashboard supports investigations into warming patterns, extreme precipitation events, droughts, and other phenomena relevant to climate research.
+
+At its core, the dashboard relies on the Global Historical Climatology Network – Daily (GHCN-Daily) dataset, maintained by NOAA’s National Centers for Environmental Information. GHCN-Daily integrates daily observations from roughly 30 different data sources into a single unified archive, encompassing well over 90,000 land‐surface stations around the globe NCEI. While about two-thirds of these stations report precipitation only, more than 25,000 provide daily maximum and minimum temperatures.
+
+GHCN-Daily has huge breadth, both spatially and temporally: records reach back into the 18th and 19th centuries in some locations, with a temporal coverage spanning from 1880 to the present NCEI. This depth enables users to contextualize modern weather extremes within their historical variability, whether examining a week‐long heatwave or a century-scale trend. By tapping directly into these publicly available NOAA archives, our application ensures transparency, reproducibility, and broad accessibility.
+
+We built this dashboard because, despite the amount of publicly available climate records, there are few easy‐to‐use tools that let non‐specialists—and even many researchers—interactively explore daily weather data at the station level. Raw GHCN‐Daily files are powerful, but they require significant technical know‐how to parse, query, and visualize. By wrapping these data in an intuitive web interface, we lower the barrier to entry: teachers can demonstrate real examples of local warming trends, community groups can investigate precipitation patterns in their own counties, and policymakers can quickly pull up the last 30 years of temperature data for any given weather station.
+
+## Methods / Implementation
+
+In the cleaning process we needed to identify the most useful stations and exclude those that had missing temperature data, short reporting periods, or limited variable coverage — so it was important to apply careful filters to ensure our analysis would be based on reliable and meaningful data.
+
+To clean and narrow down the dataset, we first downloaded the ghcnd-inventory.txt file, which summarizes all available stations, their locations, available variables (like maximum temperature, minimum temperature, and precipitation), and periods of record. We filtered this inventory to keep only stations that reported both maximum and minimum temperature (TMAX and TMIN) data, ensuring we could meaningfully study temperature trends. We also required that the stations have data available till present date (2025) to guarantee long-term consistency for climate trend analysis, and that they are only in the US since we are focusing for US metrics in this project. After this filtering, we reduced the number of stations from about 128,000 to around 6149 high-quality stations — a major but necessary reduction to balance both scientific rigor and technical feasibility.
+
+```{r good-stations}
+# Read the full stations.csv (no header, manual names)
+stations <- read_csv(
+  "data/ghcnd-stations.csv",
+  col_names = c("ID", "LATITUDE", "LONGITUDE", "ELEVATION", "STATE", "NAME", "GSN_FLAG", "HCN_CRN_FLAG", "WMO_ID"),
+  col_types = cols(
+    ID = col_character(),
+    LATITUDE = col_double(),
+    LONGITUDE = col_double(),
+    ELEVATION = col_double(),
+    STATE = col_character(),
+    NAME = col_character(),
+    GSN_FLAG = col_character(),
+    HCN_CRN_FLAG = col_character(),
+    WMO_ID = col_character()
+  )
+)
+
+# Read the inventory.txt
+inventory <- read_fwf(
+  file = "data/ghcnd-inventory.txt",
+  col_positions = fwf_positions(
+    start    = c( 1, 13, 22, 32, 37, 42),
+    end      = c(11, 20, 30, 35, 40, 45),
+    col_names = c("ID", "LATITUDE", "LONGITUDE", "ELEMENT", "FIRSTYEAR", "LASTYEAR")
+  ),
+  col_types = cols(
+    ID        = col_character(),
+    LATITUDE  = col_double(),
+    LONGITUDE = col_double(),
+    ELEMENT   = col_character(),
+    FIRSTYEAR = col_integer(),
+    LASTYEAR  = col_integer()
+  )
+)
+
+# Find stations that have BOTH TMAX and TMIN
+good_stations <- inventory %>%
+  filter(ELEMENT %in% c("TMAX", "TMIN", "PRCP")) %>%
+  distinct(ID, ELEMENT) %>%
+  pivot_wider(names_from = ELEMENT, values_from = ELEMENT, values_fn = length, values_fill = 0) %>%
+  filter(TMAX > 0, TMIN > 0) %>%
+  pull(ID)
+
+good_stations_recent <- inventory %>%
+  filter(ID %in% good_stations, ELEMENT == "TMAX") %>%
+  filter(LASTYEAR >= 2025) %>%
+  pull(ID)
+
+# Cross-match with your full stations.csv, filter to just US
+filtered_stations <- stations %>%
+  filter(
+    ID %in% good_stations_recent,
+    str_starts(ID, "US")
+  )
+
+write_csv(filtered_stations, "python_files/stations_data/filtered_stations.csv")
+
+
+station_list <- filtered_stations$ID
+
+```
+
+In order to download the filtered stations, we tried several methods but ultimately decided on one. Initially we automated the process of downloading daily weather records (.dly files) for each selected station from NOAA’s servers. Rather than downloading all available files manually (which would be extremely tedious and slow), we scripted a loop in R to efficiently download only the filtered list of stations. This worked, however looked to be slow. In appendix there is a full implementation of this method with continuation of extracting the data.
+
+Because of wanting to make this project reproducible faster, we decided to download the ghcnd_all.tar file from April 20th 2025 which is approximately 33GB of data from the full document filing [provided by NOOA](https://www1.ncdc.noaa.gov/pub/data/ghcn/daily/) and use our filtered stations list and this file to only extract the desired stations and build a duckdb file. The ghcnd_all.tar file that we use can be downloaded [here](https://drive.google.com/file/d/18-OhL_uh79cCXAuSKTn5HJa40Io30z6v/view?usp=drive_link).
+
+Considering the \>33GB file size of the `ghcnd_all` file containing all the `.dly` files for all the \~128,000 stations, it's not surprising that it was very challenging to manipulate the data in an RStudio environment. We decided it would be best to store the daily station data (which has \~50 million rows) in an external database.
+
+Therefore by using the Python duckdb package, we decided to employ Python's numpy and pandas libraries to easily and efficiently process the daily data, and then store the data in the `weather.duckdb` file in the python files directory. We decided it would be best to store the final data in a SQL database file for quick retrieval and to gain access to all the advantages a relational database provides. We settled on the following Python implementation to parse the `.dly` files from the `ghcnd_all` file and create the duckdb. Note that this process is easily translatable into R (which is why we were able to do it in both languages), and we only used Python to seamlessly create the large duckdb file, while all other code is written in R, as expected for this project.
+
+-   Initialize a duckdb connection with the following schema: ID (chr), date (Date), TMAX (dbl), TMIN (dbl), PRCP (dbl), where ID and date together make up the primary key
+
+-   Read the `.dly` files using `pandas.read_fwf()` with a carefully constructed column/width specification derived from the documentation to correctly parse the daily data
+
+-   Filter for only `TMAX`, `TMIN`, and `PRCP` rows that have `YEAR` \>= 2000
+
+-   Pivot the monthly data to a longer format so we have one row per day per element using `pandas.melt()`
+
+-   Combine `YEAR`, `MONTH`, and `DAY` into one single `date`
+
+-   Pivot the per day per element data to a wider format so we have one row per (station, date) with columns for `TMAX`, `TMIN`, and `PRCP`
+
+-   Batch insert finished rows into `weather.duckdb`
+
+-   Clean the database from bad absurd data (for example removing rows with temperature data outside of plausible -100 °C -\> +80 °C range) by filtering (in separate `clean_db.py` file)
+
+This process left us with an \~2GB duckdb database file that when placed in the data folder can cleanly be accessed by R functions that leverage the duckdb package, which we used in Homework 5.
+
+By making these decisions — focusing only on stations with strong temperature records, using automation to handle massive datasets, and cleaning the data upfront — we now have a large, global, and clean dataset ready for building an interactive dashboard. This preparation ensures that any trends or comparisons we show in the final application will be based on solid data, minimize gaps or inconsistencies, and be fast enough to load and explore without performance issues.
+
+After having our clean database, we started to implement our functions for functionality and querying for our shiny app to interact with our DuckDB. Below the functions that interact with DuckDB and query it so we get data that we can use in our shiny interface.
+
+**Functions to interact with the DuckDB**
+
+```{r}
+library(duckdb)
+library(DBI)
+
+db_path <- normalizePath("data/weather.duckdb", mustWork = TRUE)
+
+# gets list of stations
+get_station_ids <- function() {
+  con <- dbConnect(duckdb::duckdb(), db_path)
+  on.exit(dbDisconnect(con, shutdown = TRUE), add = TRUE)
+  ids_df <- dbGetQuery(con,
+    "SELECT DISTINCT ID
+       FROM weather
+    ORDER BY ID"
+  )
+  ids_df$ID
+}
+
+
+#Get all records from a station in a specified date range
+get_records_date_range <- function(stationID, start_date, end_date) {
+  start_date <- as.Date(start_date)
+  end_date   <- as.Date(end_date)
+
+  con <- dbConnect(duckdb::duckdb(), db_path)
+  on.exit(dbDisconnect(con, shutdown = TRUE), add = TRUE)
+
+  sql <- "
+    SELECT *
+      FROM weather
+     WHERE ID   = ?
+       AND date BETWEEN ? AND ?
+     ORDER BY date
+  "
+  res <- dbGetQuery(con, sql, params = list(stationID, start_date, end_date))
+
+  if (nrow(res) == 0) {
+    return(NULL)
+  }
+
+  # <-- here’s the key step:
+  res$date <- as.Date(res$date, origin = "1970-01-01")
+  print(class(res$date))
+  return(res)
+}
+```
+
+The `get_station_ids` function is responsible for retrieving a list of unique weather station identifiers from a DuckDB database. It first establishes a connection to the specified DuckDB database located at the normalized path `data/weather.duckdb`. Upon executing the SQL query `"SELECT DISTINCT ID FROM weather ORDER BY ID"`, the function fetches all distinct station IDs from the weather table, sorting them in ascending order. After retrieving these IDs as a data frame, it extracts and returns just the column containing station identifiers. The database connection is gracefully closed upon completion due to the on.exit call, which ensures proper resource management.
+
+The get_records_date_range function retrieves all records for a specific weather station within a user-defined date range from the DuckDB database. The inputs include a `stationID`, as well as `start_date` and `end_date`, which are explicitly converted to Date objects in R. It connects to the DuckDB database at the same normalized path, executes a parameterized SQL query to safely filter records by the specified station ID and date interval, and retrieves the resulting data. If no records match the criteria, the function returns `NULL`. Otherwise, it converts the date column into standard R Date format, explicitly specifying an origin of "1970-01-01" to ensure proper handling. The converted dates are verified through a printed statement confirming their class. Similar to the previous function, the database connection is automatically closed after the operation completes.
+
+After implementing these functions we started implementing our Shiny App found in `app.R`. This Shiny application, Weather Records Explorer, provides an interactive dashboard for querying and visualizing historical weather data stored in our DuckDB database. The app architecture blends several R packages—shiny, leaflet, plotly, DT, dplyr, purrr, and duckdb—to create a highly responsive and visually rich user interface with real-time querying and caching features.
+
+The user interface is constructed using `fluidPage()` with a `sidebarLayout()` and styled with the `bslib::bs_theme()` function using the "flatly" Bootswatch theme. The sidebar panel begins by offering a radio button input via `radioButtons()` to select between "Station" and "State" modes. Based on this input, conditional UI logic powered by `shinyjs::show()` and `shinyjs::hide()` toggles the visibility of either a `leafletOutput()` map showing station locations or a `selectInput()` dropdown listing states extracted from the filtered_stations dataset. This toggling is triggered within an `observe()` block that also dynamically switches the active tab panel using `updateTabsetPanel()` and enables or disables the relevant tabs using CSS selectors.
+
+For "Station" mode, the application displays a map rendered by leaflet() where markers are created using `addCircleMarkers()` and are linked to station IDs via `layerId = ~ID`. When a station is clicked, the app captures its ID through input\$station_map_marker_click and stores it in a `reactiveVal()` called selected_station. When the user defines a date range and clicks the "Get Range of Records" button, the server triggers `eventReactive(input$go_range, ...)`, which uses the get_records_date_range() function—sourced from duckdb_fns.qmd—to query the DuckDB database using parameterized SQL via `dbGetQuery(..., params = list(...))`. The result is a data frame of daily weather observations filtered by station ID and date, with the date column explicitly converted using as.Date(..., origin = "1970-01-01").
+
+The retrieved station-level data is visualized in three forms. First, a `DT::renderDataTable()` displays the raw observations, with filtering enabled via options = list(filter = 'top'). Second, a time-series plot is generated using ggplot() and converted into an interactive plotly object with `ggplotly(),` plotting TMAX, TMIN, and PRCP as separate lines over time using a reshaped `pivot_longer()` format. Third, summary statistics including mean, min, max, and median are calculated using functions like `mean()`, `min()`, and `median()` and displayed in a table with renderTable(). Finally, a heatmap is rendered using `plot_ly(type = "heatmap")` to show temperature and precipitation values across time and metric dimensions.
+
+In "State" mode, the user selects a state from a dropdown, and the app retrieves the IDs of all stations in that state using a `dplyr::filter()` and pull(ID). When the "Get Range of Records" button is pressed, the server initiates `eventReactive(input$go_range, ...)`, which loops over all station IDs and queries each one via `purrr::map_dfr()` with get_records_date_range(). A `withProgress()` wrapper provides a loading indicator, and to improve efficiency, the resulting data frame is cached in a `reactiveValues()` list using a key formed from the state name and date range.
+
+After retrieving and caching the full set of station-level records for the state, the app computes daily averages across all stations using group_by(date) and summarize() with mean(..., `na.rm = TRUE`). These averaged values are used to populate a state-level data table (with `renderDataTable()`), an interactive time-series plot (again using `ggplotly()`), summary statistics, and a heatmap of daily metrics.
+
+The application includes several enhancements to improve usability and performance. Spinners from `shinycssloaders::withSpinner()` are used in `state_plot_ui` and `state_heatmap_ui` to provide visual feedback during computation, enhancing the user experience during potentially long data processing steps. Since temperature values in the dataset are stored in tenths of degrees Celsius, the app converts `TMAX` and `TMIN` by dividing them by 10 to present the values in standard units for better interpretability. To facilitate data export, `downloadHandler()` is implemented in both Station and State modes, allowing users to download query results as CSV files. Input validation is enforced using `req()` to ensure all necessary inputs are provided before triggering reactive computations, thereby preventing errors. Finally, the app gracefully handles empty query results by displaying a fallback message such as `"No records found"` using either `datatable()` or `renderText()`.
+
+In summary, the Weather Records Explorer combines embedded SQL querying using duckdb, interactive plotting with plotly, geographic visualization with leaflet, and robust reactivity with Shiny to deliver a streamlined exploratory tool. The modularity of the backend—especially the abstraction of database queries into helper functions and the use of reactive caching—ensures scalability and performance, while the polished interface ensures an intuitive user experience for exploring high-volume environmental data.
+
+## Discussion & Conclusion
+
+The Weather Records Explorer offers an accessible and powerful way for users to explore daily weather data across the United States. By combining a user-friendly interface with real weather observations from NOAA’s GHCN-Daily database, the app allows anyone—from researchers to students and local decision-makers—to visualize and interpret patterns in temperature and precipitation. Whether someone wants to examine a single station’s temperature trends or compare average conditions across an entire state, the app provides a flexible and intuitive environment for that exploration.
+
+One of our main goals in building this tool was to reduce the barriers to working with raw climate data. While the GHCN-Daily dataset is rich and publicly available, it is difficult to use without technical expertise. Parsing fixed-width .dly files and filtering for quality data requires both programming knowledge and time. Our approach made these data usable by filtering to include only reliable U.S. stations with long-term records and then storing those records in a DuckDB database, which allowed for fast and efficient data retrieval in the background. This means users can focus on exploring the data and drawing conclusions, without needing to worry about how the data were loaded or processed.
+
+The dashboard brings these data to life through maps, tables, plots, and heatmaps. These features allow users to investigate recent extremes—like cold snaps or heavy rainfall events—or zoom out to explore long-term averages and seasonal patterns. By supporting both station-level and state-level views, the app is useful for a wide range of use cases, from local community concerns to broader educational and research questions.
+
+In summary, this project shows how publicly available data can be transformed into an engaging and informative tool with real-world value. By making it easier to access, query, and visualize high-quality climate data, we help enable more informed conversations about weather, climate, and change across both scientific and public communities.
+
+## Limitations and Future Work
+
+While the Weather Records Explorer performs well for the scope of this project, there are several limitations worth noting. First, the dataset is restricted to U.S. land-based stations that report both TMAX and TMIN, which means we exclude many stations that only report precipitation or have incomplete records. Additionally, the app currently displays raw weather variables but does not adjust for factors like elevation, urbanization, or regional climate differences that may affect interpretation.
+
+Another limitation is performance when working with larger sets of stations. While caching and database optimizations help, querying hundreds of stations across long time periods can still take noticeable time. This could be improved in the future through asynchronous processing or server-side optimizations. Also, while our app filters out obviously erroneous values (e.g., extreme temperatures outside physical limits), it does not currently apply rigorous quality control flags provided by NOAA, which could enhance the reliability of the results.
+
+Future improvements could include adding support for more variables, such as snowfall or wind speed, expanding coverage to international stations, or incorporating trend analysis and anomaly detection features. From a usability standpoint, the app could benefit from downloadable reports, more interactivity in visualizations, and improved mobile responsiveness. Overall, the project lays a strong foundation for future development while already offering a valuable, usable tool for exploring climate data.
+
+## Appendix
+
+This section uses httr2 to politely download the data. Information about the stations is read from the csv and filtered to find "good stations" which we want to include in our analysis, as described above. Then, a GET request is performed for every desired .dly file. We prepared a function to make the requests, including built-in safeguards for potential errors and to avoid redownloading files we already have. The IDs for our filtered set of "good stations" are fed into the function. Though the large quantity of files to download meant this process took a long time, the data is later saved in a .csv file, so repeating the downloading process is not necessary.
+
+```{r}
+# #code for downloading the raw data, just use the parquet and csv now
+# 
+# # Read the full stations.csv (no header, manual names)
+# stations <- read_csv(
+#   "data/ghcnd-stations.csv",
+#   col_names = c("ID", "LATITUDE", "LONGITUDE", "ELEVATION", "STATE", "NAME", "GSN_FLAG", "HCN_CRN_FLAG", "WMO_ID"),
+#   col_types = cols(
+#     ID = col_character(),
+#     LATITUDE = col_double(),
+#     LONGITUDE = col_double(),
+#     ELEVATION = col_double(),
+#     STATE = col_character(),
+#     NAME = col_character(),
+#     GSN_FLAG = col_character(),
+#     HCN_CRN_FLAG = col_character(),
+#     WMO_ID = col_character()
+#   )
+# )
+# 
+# # Read the inventory.txt
+# inventory <- read_fwf(
+#   "data/ghcnd-inventory.txt",
+#   fwf_cols(
+#     ID = c(1, 11),
+#     LATITUDE = c(13, 20),
+#     LONGITUDE = c(22, 30),
+#     ELEMENT = c(32, 35),
+#     FIRSTYEAR = c(37, 40),
+#     LASTYEAR = c(42, 45)
+#   ),
+#   col_types = cols(
+#     ID = col_character(),
+#     LATITUDE = col_double(),
+#     LONGITUDE = col_double(),
+#     ELEMENT = col_character(),
+#     FIRSTYEAR = col_integer(),
+#     LASTYEAR = col_integer()
+#   )
+# )
+# 
+# # Find stations that have BOTH TMAX and TMIN
+# good_stations <- inventory %>%
+#   filter(ELEMENT %in% c("TMAX", "TMIN", "PRCP")) %>%
+#   distinct(ID, ELEMENT) %>%
+#   pivot_wider(names_from = ELEMENT, values_from = ELEMENT, values_fn = length, values_fill = 0) %>%
+#   filter(TMAX > 0, TMIN > 0) %>%
+#   pull(ID)
+# 
+# good_stations_recent <- inventory %>%
+#   filter(ID %in% good_stations, ELEMENT == "TMAX") %>%
+#   filter(LASTYEAR >= 2025) %>%
+#   pull(ID)
+# 
+# # Cross-match with your full stations.csv, filter to just US
+# filtered_stations <- stations %>%
+#   filter(
+#     ID %in% good_stations_recent,
+#     str_starts(ID, "US")
+#   )
+# 
+# # Create download folder
+# dir.create("ghcnd_selected", showWarnings = FALSE)
+# 
+# # Define download function using httr2
+# download_station_httr2 <- function(station_id, max_retries = 5) {
+#   base_url <- "https://www1.ncdc.noaa.gov/pub/data/ghcn/daily/all/"
+#   file_url <- paste0(base_url, station_id, ".dly")
+#   dest_file <- paste0("ghcnd_selected/", station_id, ".dly")
+#   
+#   if (file.exists(dest_file) && file.info(dest_file)$size > 0) {
+#     message(paste("Already exists, skipping", station_id))
+#     return(NULL)
+#   }
+#   
+#   attempt <- 1
+#   success <- FALSE
+#   wait_time <- 5  # start with 5 seconds
+# 
+#   while (attempt <= max_retries && !success) {
+#     tryCatch({
+#       resp <- request(file_url) |> 
+#         req_timeout(30) |> 
+#         req_perform()
+#       
+#       if (resp$status_code == 200) {
+#         writeBin(resp$body, dest_file)
+#         message(paste("Downloaded", station_id))
+#         success <- TRUE
+#       } else if (resp$status_code == 404) {
+#         message(paste("File not found (404) for", station_id, "- skipping."))
+#         success <- TRUE  # File really doesn't exist, stop trying
+#       } else {
+#         message(paste("Attempt", attempt, "- HTTP", resp$status_code, "for", station_id, "- retrying after", wait_time, "seconds..."))
+#         Sys.sleep(wait_time)
+#         wait_time <- wait_time * 2  # Exponential backoff (double wait time)
+#       }
+#     }, error = function(e) {
+#       message(paste("Attempt", attempt, "- Error downloading", station_id, ":", e$message, "- retrying after", wait_time, "seconds..."))
+#       Sys.sleep(wait_time)
+#       wait_time <- wait_time * 2
+#     })
+#     
+#     attempt <- attempt + 1
+#   }
+#   
+#   if (!success) {
+#     message(paste("Failed to download", station_id, "after", max_retries, "attempts."))
+#   }
+#   
+#   Sys.sleep(0.5)  # Polite short pause between stations
+# }
+# # 8. Download the filtered stations
+# station_list <- filtered_stations$ID
+# # Test first
+# # walk(station_list[1:5], download_station_httr2)
+# 
+# # After testing works, download all:
+# #walk(station_list, download_station_httr2)
+```
+
+This next part tidies the data and binds the selected .dly files together. Each .dly file is tidied seperately. Column names are assigned. We filter for rows containing data on temperature max, temperature min, and precipitation because we are not interested in any of the other weather data available in these files. We then pivot longer to get rows for each day instead of columns. We filter for missing values. In these datasets, missing values are encoded as -9999. We also filter to only include data from 2000 and after. This was practically necessary to cut down on the size of our data, while still retaining a long enough weather record to be interesting. Then, we pivot wider so that each day only has one row and the weather elements we are interested (max and min temperature, and precipitation) get their own columns. However, some days that record min and max temperatures do not record precipitation measurement. For consistency and to avoid later problems, NA values are assigned when there is no value recorded for precipitation. Then, the data is summarized to calculate monthly means for all weather elements of interest. Each time a file is processed, it is added to a list, and a print statement let's you know that everything has gone smoothly. Once all the files are processed, the entire list is concatanated using rbind to make one large data frame. Because the resulting dataframe is so large, it is saved to a parquet file for easy sharing among group members.
+
+```{r}
+# library(tidyverse)
+# library(data.table)
+# library(readr)
+# library(arrow)  # for write_parquet
+# 
+# # List only .dly files
+# us_files <- list.files("ghcnd_selected", pattern = "\\.dly$", full.names = TRUE)
+# 
+# # Prepare output directory
+# dir.create("data/filtered_weather", showWarnings = FALSE)
+# 
+# # Prepare a list to collect all results
+# results_list <- vector("list", length(us_files))
+# 
+# # Loop through files
+# for (i in seq_along(us_files)) {
+#   file <- us_files[i]
+#   
+#   # Define column names for .dly format
+#   col_names <- c("ID", "YEAR", "MONTH", "ELEMENT",
+#                  paste0(rep(c("VALUE", "MFLAG", "QFLAG", "SFLAG"), times = 31),
+#                         "_", rep(1:31, each = 4)))
+#   
+#   # Read fixed-width file
+#   df <- read_fwf(
+#     file,
+#     fwf_widths(c(11, 4, 2, 4, rep(c(5, 1, 1, 1), 31)), col_names = col_names),
+#     col_types = cols(.default = col_character())
+#   )
+#   
+#   # Extract just the VALUE columns
+#   value_cols <- paste0("VALUE_", 1:31)
+#   
+#   # Filter, reshape, and summarize
+#   df_filtered <- df %>%
+#     filter(ELEMENT %in% c("TMAX", "TMIN", "PRCP")) %>%
+#     pivot_longer(
+#       cols = all_of(value_cols),
+#       names_to = "DAY",
+#       names_prefix = "VALUE_",
+#       values_to = "VALUE"
+#     ) %>%
+#     mutate(
+#       MONTH = as.integer(MONTH),
+#       YEAR = as.integer(YEAR),
+#       DAY = as.integer(DAY),
+#       VALUE = as.numeric(VALUE)
+#     ) %>%
+#     filter(VALUE != -9999 & !is.na(VALUE), YEAR >= 2000) %>%
+#     pivot_wider(
+#       id_cols = c(ID, YEAR, MONTH, DAY),
+#       names_from = ELEMENT,
+#       values_from = VALUE
+#     )
+# 
+#   # If PRCP column is missing, add it as NA (for consistency)
+#   if (!"PRCP" %in% names(df_filtered)) {
+#     df_filtered$PRCP <- NA_real_
+#   }
+# 
+#   # Summarize to monthly means
+#   if (nrow(df_filtered) > 0) {
+#     df_summary <- df_filtered %>%
+#       summarize(
+#         mean_TMAX = mean(TMAX, na.rm = TRUE),
+#         mean_TMIN = mean(TMIN, na.rm = TRUE),
+#         mean_PRCP = mean(PRCP, na.rm = TRUE),
+#         .by = c(ID, YEAR, MONTH)
+#       )
+#     
+#     results_list[[i]] <- df_summary
+#     print(paste0("Processed: ", basename(file)))
+#   }
+# }
+# 
+# # Combine all results at once
+# combined_filtered_data <- rbindlist(results_list, fill = TRUE)
+# 
+# # Save to Parquet
+# write_parquet(combined_filtered_data, "data/filtered_weather/filtered_weather.parquet")
+
+```
+
+Here, the parquet file is written into a csv. Temperature values are converted into degrees Celcius, and precipitation into millimeters.
+
+```{r}
+
+# weather_data <- read_parquet("data/filtered_weather/filtered_weather.parquet")
+# 
+# weather_monthly_means <- left_join(weather_data, stations, by = join_by(ID)) |>
+#   mutate(
+#     mean_TMIN = mean_TMIN/10, 
+#     mean_TMAX = mean_TMAX/10, 
+#     mean_PRCP = mean_PRCP/10
+#   )
+
+# write_csv(weather_monthly_means, "data/weather_means.csv")
+```
+
+The above process is repeated again, but this time without calculating monthly means. The resulting dataset has daily weather data from every "good station" from the year 2000 through April, 2025. Since there are significantly more rows in this dataframe than the previous one which averaged across months, the resulting parquet file is much larger, and even too large to push to the github repository. However, the code below takes about half an hour to run and will yield both a parquet file and a csv with daily temperature data.
+
+Note that this csv does contain some absurd values, because we did not proceed with cleaning and processing after deciding to go forward with the python script to integrate with duckDB. However, having these data frames in the R environment while working on this project continued to be useful to get familiar with the data and it's structure.
+
+```{r}
+# 
+# library(tidyverse)
+# library(data.table)
+# library(readr)
+# library(arrow)  # for write_parquet
+# 
+# # List only .dly files
+# us_files <- list.files("ghcnd_selected", pattern = "\\.dly$", full.names = TRUE)
+# 
+# # Prepare output directory
+# dir.create("data/filtered_weather", showWarnings = FALSE)
+# 
+# # Prepare a list to collect all results
+# results_list <- vector("list", length(us_files))
+# 
+# # Loop through files
+# for (i in seq_along(us_files)) {
+#   file <- us_files[i]
+#   
+#   # Define column names for .dly format
+#   col_names <- c("ID", "YEAR", "MONTH", "ELEMENT",
+#                  paste0(rep(c("VALUE", "MFLAG", "QFLAG", "SFLAG"), times = 31),
+#                         "_", rep(1:31, each = 4)))
+#   
+#   # Read fixed-width file
+#   df <- read_fwf(
+#     file,
+#     fwf_widths(c(11, 4, 2, 4, rep(c(5, 1, 1, 1), 31)), col_names = col_names),
+#     col_types = cols(.default = col_character())
+#   )
+#   
+#   # Extract just the VALUE columns
+#   value_cols <- paste0("VALUE_", 1:31)
+#   
+#   # Filter, reshape, and summarize
+#   df_filtered <- df %>%
+#     filter(ELEMENT %in% c("TMAX", "TMIN", "PRCP")) %>%
+#     pivot_longer(
+#       cols = all_of(value_cols),
+#       names_to = "DAY",
+#       names_prefix = "VALUE_",
+#       values_to = "VALUE"
+#     ) %>%
+#     mutate(
+#       MONTH = as.integer(MONTH),
+#       YEAR = as.integer(YEAR),
+#       DAY = as.integer(DAY),
+#       VALUE = as.numeric(VALUE)
+#     ) %>%
+#     filter(VALUE != -9999 & !is.na(VALUE), YEAR >= 2000) %>%
+#     pivot_wider(
+#       id_cols = c(ID, YEAR, MONTH, DAY),
+#       names_from = ELEMENT,
+#       values_from = VALUE
+#     )
+# 
+#   # If PRCP column is missing, add it as NA
+#   if (!"PRCP" %in% names(df_filtered)) {
+#     df_filtered$PRCP <- NA_real_
+#   }
+# 
+#   if (nrow(df_filtered) > 0) {
+#     results_list[[i]] <- df_filtered
+#     print(paste0("Processed: ", basename(file)))
+#   }
+# }
+# 
+# # Combine all results
+# daily_filtered_data <- rbindlist(results_list, fill = TRUE)
+# 
+# # Save to Parquet
+# write_parquet(daily_filtered_data, "data/filtered_weather/daily_weather.parquet")
+# 
+# # Read as df
+# daily_weather <- read_parquet("data/filtered_weather/daily_weather.parquet")
+# 
+# daily_weather <- left_join(daily_weather, stations, by = join_by(ID)) |>
+#   mutate(
+#     TMIN = TMIN/10, 
+#     TMAX = TMAX/10, 
+#     PRCP = PRCP/10
+#   )
+
+# write_csv(daily_weather, "data/daily_weather.csv")
+```
