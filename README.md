@@ -1,26 +1,14 @@
-How to Run Locally
+## How to Run Locally
 
-Prerequisites:
+### Prerequisites:
+- R
+- DuckDB
 
-R
+## Installation:
 
-DuckDB
-
-Installation:
-
-Clone the repository:
-
-Bash
-git clone 
-Install required R packages:
-
-R
-install.packages(c("shiny", "duckdb", "leaflet", "plotly", "dplyr", "DBI"))
-Run .qmd file
-
-R
-library(shiny)
-runApp("app.R")
+- install.packages(c("shiny", "duckdb", "leaflet", "plotly", "dplyr", "DBI"))
+- Run .qmd file
+- runApp("app.R")
 
 Data Source
 
